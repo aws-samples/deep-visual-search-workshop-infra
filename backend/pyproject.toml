@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "backend"
+version = "0.1.0"
+description = ""
+authors = ["Vatsal Shah <shahvats@amazon.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.7"
+requests = "^2.27.1"
+boto3 = "^1.21.44"
+opensearch-py = "^1.1.0"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
