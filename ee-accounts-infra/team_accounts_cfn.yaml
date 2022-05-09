@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'AWS CloudFormation Template to install DVS Infra'
+Parameters:
+  # Optional parameters passed by the Event Engine to the stack.
+  EEEventId:
+    Description: "Unique ID of this Event"
+    Type: String
+  EETeamId:
+    Description: "Unique ID of this Team"
+    Type: String
+  EEModuleId:
+    Description: "Unique ID of this module"
+    Type: String
+  EEModuleVersion:
+    Description: "Version of this module"
+    Type: String
+  EEAssetsBucket:
+    Description: "Region-specific assets S3 bucket name (e.g. ee-assets-prod-us-east-1)"
+    Type: String
+  EEAssetsKeyPrefix:
+    Description: "S3 key prefix where this modules assets are stored. (e.g. modules/my_module/v1/)"
+    Type: String
+  EECentralAccountId:
+    Description: "AWS Account Id of the Central account"
+    Type: String
+  EETeamRoleArn:
+    Description: "ARN of the Team Role"
+    Type: String
+  EEKeyPair:
+    Description: "Name of the EC2 KeyPair generated for the Team"
+    Type: AWS::EC2::KeyPair::KeyName
+Resources:
+  BatchServerIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  BatchServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref BatchServerIAMRole
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      KeyName:
+        Ref: "EEKeyPair"
+      IamInstanceProfile: !Ref BatchServerInstanceProfile
+      InstanceInitiatedShutdownBehavior: terminate
+      SecurityGroupIds:
+        - !Ref BatchServerSecurityGroup
+      AvailabilityZone: !Select ["0", !GetAZs ""]
+      InstanceType: m5.large
+      ImageId: ami-0f9fc25dd2506cf6d
+      Tags:
+          - Key: Name
+            Value: DVS-CDK-Deployer
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          set -o pipefail
+
+          amazon-linux-extras enable python3
+          curl -sL https://rpm.nodesource.com/setup_16.x | bash -
+          yum update -y
+          yum install -y jq git nodejs awscli python3 python3-pip docker
+          systemctl start docker.service
+          docker --version
+          npm install -g aws-cdk
+          REGION=`curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq .region -r`
+          ACCOUNT=`curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq .accountId -r`
+          aws configure set region $REGION
+          git clone https://github.com/aws-samples/deep-visual-search-workshop-infra.git
+          cd deep-visual-search-workshop-infra
+          pip3 install -r requirements.txt
+          cd frontend
+          npm install
+          mkdir build
+          cd ..
+          ./cdk-bootstrap-to.sh $ACCOUNT $REGION
+          ./cdk-deploy-to.sh $ACCOUNT $REGION VisualSearchEngineInfraStack --outputs-file ./frontend/src/config/config.json
+          cd frontend
+          npm run-script build
+          cd ..
+          ./cdk-deploy-to.sh $ACCOUNT $REGION VisualSearchEngineFrontendStack
+          uuid=$(uuidgen)
+          echo "Unique ID generated to signal back to CFN $uuid"
+          jq -n --arg uuid "$uuid" '{Status : "SUCCESS", Reason : "Configuration Complete", UniqueId : $uuid, Data : "Application has completed configuration."}' > /tmp/dvs_ack.json
+          echo "CFN Signal URL - ${DVSDeployWaitHandle}"
+          curl -T /tmp/dvs_ack.json "${DVSDeployWaitHandle}"
+          echo "Environment pre-provisioned for Deep Visual Search Lab"
+          shutdown -h now
+  BatchServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F1000
+            reason: This is using default VPC where we dont know VpcId to support egress. Missing egress rule means all traffic is allowed outbound.
+    Properties:
+      GroupDescription: Enable SSH access via port 22
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  DVSDeployWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+  DVSDeployWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: Instance
+    Properties:
+      Handle: !Ref 'DVSDeployWaitHandle'
+      Timeout: '3600'
+Outputs:
+  BatchServerPublicDNS:
+    Description: Public DNS of EC2 instance
+    Value: !GetAtt Instance.PublicDnsName
+  DVSDeployWaitConditionData:
+    Description: The data passed back as part of signalling the DVSDeployWaitCondition
+    Value: !GetAtt [ "DVSDeployWaitCondition", "Data" ]
